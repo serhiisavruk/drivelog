@@ -118,6 +118,138 @@ Source: timurrrr/ft86 gen2 doc (single-source; treat as reverse-engineering, val
 
 ---
 
+## Data access by port
+
+Three physical ports on a US-market GR86. UDS is a protocol layered on top of OBD-II (same connector), so it's not a fourth port.
+
+### Summary
+
+| | **OBD-II** (driver dash) | **ASC** (R of glovebox) | **DCM / EC-CAN** (behind glovebox) |
+|---|---|---|---|
+| Bus bitrate | 500 kbit/s CAN (gatewayed) | 500 kbit/s CAN | 500 kbit/s CAN |
+| Access mode | Request / response | Passive broadcasts | Passive broadcasts |
+| Protocols | OBD-II (J1979), UDS, DTCs | Raw broadcast frames | Raw broadcast frames |
+| Max rate | ~5–20 Hz total (polling) | ~3,000–5,000 fps | ~1,000–3,000 fps |
+| Needs DBC? | No (standard PIDs) / partial (UDS) | Yes | Yes |
+| Intrusive install? | No, plug-in | Low — pass-through harness | Medium — reach behind glovebox |
+| Available on US GR86 | ✅ | ✅ | ✅ |
+| Available on US BRZ | ✅ | ✅ | ❌ (no DCM module) |
+
+### OBD-II port — what you can get
+
+**Standard PIDs (J1979 Mode 01):**
+- Engine RPM, vehicle speed, coolant temp, intake air temp
+- Throttle position, MAF, MAP, fuel level
+- Short/long-term fuel trims, O2 sensor voltages
+- Ignition timing advance, engine load
+- Distance since DTC clear, run time
+
+**Mode 03 / 07 / 0A:** DTCs (current, pending, permanent)
+**Mode 09:** VIN, ECU name, calibration IDs
+**UDS (ISO 14229):** manufacturer-specific data — richer, but per-ECU and undocumented for ZN8. Example product: DauntlessOBD Enhanced.
+
+**Ceiling:** ~5–20 datapoints/sec *total* across everything polled. Fine for DTC / trip / fuel-economy logging. Not useful for driving telemetry.
+
+### ASC connector — what you can get
+
+Passive broadcasts (no requests). Signal list from timurrrr/ft86 gen2:
+
+| Signal | CAN ID | Rate |
+|---|---|---|
+| RPM, throttle, neutral switch | 0x40 | 100 Hz |
+| AT gear / mode | 0x48 | 100 Hz |
+| Steering angle, yaw rate | 0x138 | 50 Hz |
+| Vehicle speed (aggregate), brake pressure | 0x139 | 50 Hz |
+| Lat / long G | 0x13B | 50 Hz |
+| Gear, clutch (MT) | 0x241 | 20 Hz |
+| Oil / coolant temp | 0x345 | 10 Hz |
+| TPMS | 0x6E2 | 1 Hz |
+
+**Not on this bus (filtered by gateway):** individual wheel speeds (0x13A), 0x143, 0x2D2.
+
+### DCM / EC-CAN connector — what you can get
+
+Fills the gap ASC leaves. Also carries body-side traffic (doors, HVAC, lights) — specifics for ZN8 not covered in reviewed sources.
+
+| Signal | CAN ID | Rate |
+|---|---|---|
+| **Individual wheel speeds (FL/FR/RL/RR)** | 0x13A | 50 Hz |
+| 0x143 (content not documented in sources) | 0x143 | — |
+| 0x2D2 (content not documented in sources) | 0x2D2 | — |
+
+### Port selection by goal
+
+| Goal | Port(s) |
+|---|---|
+| DTCs, VIN, fuel economy, trip stats | OBD-II |
+| Driving telemetry (RPM, G, steering, brake, gear) | ASC |
+| Per-wheel slip, ABS analysis | ASC + DCM |
+| Body / comfort state (doors, HVAC) | DCM (partial — specifics unverified) |
+| Maximum fidelity | All three: OBD-II (polled) + ASC (can0) + DCM (can1) |
+
+---
+
+## Aftermarket CAN sensors
+
+Some missing signals (oil pressure, oil temp on some years, EGT, brake line pressure) can be added via aftermarket sensor kits that inject frames onto the car's CAN network. Relevant to drivelog because the injection point decides which of the three ports picks them up.
+
+### Ansix Auto — 2022+ BRZ/GR86 Oil Pressure Sensor CAN Bus Kit ($265)
+
+**Why it exists:** The FA24 has only a pressure *switch* from the factory — the dash light triggers at zero pressure and nothing before. No oil pressure value is published on any stock CAN bus. Aftermarket is the only route.
+
+**What it does (per [vendor product page](https://ansixauto.com/product/2022-brz-gr86-oil-pressure-sensor-canbus-kit/)):**
+- OEM-spec 10 bar (145 psi) stainless steel pressure sensor threads into the engine (replaces OEM pressure-switch location).
+- Ansix adapter box reads the sensor and drives the factory dash warning light with **RPM-dependent pressure thresholds** (not just zero). User selects oil weight at install so thresholds match.
+- Adapter transmits pressure as CAN frames on the **car's CAN network via a built-in OBD-II port adapter**.
+- Install: ~15 min, no cutting / splicing / soldering of OEM wiring.
+
+**Critical detail for the logger design:**
+
+> *"OBD Port CAN adapter is built into this product. You do not need to purchase both the Oil Pressure Kit and CAN Harness."*
+
+Injection is via the **OBD-II port**, not the ASC connector. This is the opposite of Ansix's *separate* CAN Adapter product (which does tap ASC). Two different products — do not conflate.
+
+### Where the oil-pressure frames land
+
+[inferred from product copy — not confirmed by a DBC or measurement]
+
+- OBD-II pins 6/14 on the ZN8 expose HS-CAN (filtered by gateway for broadcasts, but physically still the HS-CAN pair).
+- The Ansix adapter transmits on that bus → frames are visible to anything plugged into OBD-II.
+- The gateway separates HS-CAN from the ASC and EC-CAN domains → the oil-pressure frames will **not** appear on the ASC tap or the DCM tap.
+
+Consequence: to log oil pressure, your logger **must** tap OBD-II. If you were planning OBD-II only for polled PIDs, this makes the tap more valuable.
+
+### Conflict: Ansix occupies the OBD-II port
+
+The Ansix kit ships with an OBD-II plug that terminates in the port. If drivelog also needs OBD-II access (for PID polling, DTCs, *and* to read the Ansix oil-pressure frames), the port must be shared.
+
+Options, cleanest first:
+
+1. **OBD-II Y-splitter cable** ($15–30, off-the-shelf). Car-side plug → two female OBD-II sockets. Ansix in one, logger in the other. Electrically a passive CAN multi-drop. Standard solution for "multiple OBD-II accessories."
+2. **Custom Y harness.** One full OBD-II socket for Ansix + a bare pigtail (CAN-H / CAN-L / GND / 12V) to the logger. Cleaner permanent install, not off-the-shelf.
+3. **Ask Ansix for a pass-through adapter.** [unverified] — not listed on the product page; worth asking support.
+4. **Tap HS-CAN at a different point** (e.g., splice into the OBD-II wires upstream). Works electrically, but defeats the "no cutting" goal.
+
+### Compatibility with the 3-port plan
+
+| Port | Status with Ansix kit installed |
+|---|---|
+| **OBD-II** | Occupied — needs Y-splitter to share with logger |
+| **ASC** | Unaffected — free |
+| **DCM / EC-CAN** | Unaffected — free |
+
+The 3-port logger plan survives intact with an OBD-II Y-splitter added. No impact on the ASC or DCM taps.
+
+### Unknowns to close before install
+
+- **Ansix CAN ID + scaling.** Need their DBC / spec sheet to decode the oil-pressure frames. Not published on the product page.
+- **Ansix plug form factor.** Terminal plug vs pass-through — affects whether a Y-splitter is needed or if they already route through. [unverified]
+- **Whether the Ansix adapter also *responds* to OBD-II requests.** If it answers on any ID, check for collision with ECU responses when drivelog polls PIDs. [unverified]
+- **Bus load contribution.** One sensor at some unknown cycle time (~10–50 Hz expected). Negligible on 500 kbit/s, but worth noting for completeness. [unverified]
+- **Whether the dash-light override uses the OEM switch wire or a CAN message.** Product copy implies they drive the stock circuit directly, but this isn't spelled out. Affects nothing for logging but worth knowing for install.
+
+---
+
 ## Bottom line for drivelog on a GR86
 
 ### Safe defaults (sourced)
