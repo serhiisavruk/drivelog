@@ -1,0 +1,37 @@
+# Captured data — never commit
+/sessions/
+/data/
+*.log
+*.log.gz
+*.asc
+*.blf
+*.mf4
+*.nmea
+*.nmea.gz
+
+# Local config with secrets / host-specific paths
+drivelog.yaml
+drivelog.local.yaml
+*.env
+.env
+secrets/
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.eggs/
+*.egg-info/
+dist/
+build/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
